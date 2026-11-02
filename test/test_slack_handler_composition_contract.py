@@ -239,10 +239,11 @@ _SPLIT_HELPERS: dict[str, str] = {
 #: channel passes), ``turn_context`` on it too (a pinned action answer's payload),
 #: ``interpret_commands`` on it too (an OPTIONS answer's label reaches the slot),
 #: ``post_linked_approval``'s ``thread_ts`` widened to ``str | None`` (a code
-#: channel's own session posts its approval card top-level), and its keyword-only
+#: channel's own session posts its approval card top-level), its keyword-only
 #: ``mcp_server_name`` / ``tool_name`` / ``mcp_identity_trusted`` (the mirrored card
-#: names the trusted MCP server, as the native card does).
-_BASE_SHAPE_DIGEST = "b153ff17dbc03add5922f4acf1cbb544d2a779b7a2af25dc4d8ccaa2df03cbf9"
+#: names the trusted MCP server, as the native card does), and its ``channel_trust``
+#: (a code channel's card adds "Trust this channel").
+_BASE_SHAPE_DIGEST = "3716e196097c05526b2c5f2d8f432918cf06adcb0c67ac70a20e5e071b5c7d37"
 
 #: Definitions that stay in the facade file, each because a repository guard, a
 #: contract or the import-time body reads it there. The reason per entry is in
