@@ -170,12 +170,14 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _effective_approved_grants,
         _held_back_entries,
         _is_sidecar_entry,
+        _next_token_cutoff,
         _now_iso,
         _parse_approved_grants,
         _pending_session_approval_after_manifest_change,
         _read_approved_grants,
         _read_enabled,
         _read_installed,
+        _read_not_before,
         _read_schema_version,
         _record_lock_path,
         _record_lock_state,
@@ -201,6 +203,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         app_data_dir,
         app_dir,
         app_record_lock,
+        app_token_cutoff,
         approved_manifest_permissions,
         apps_dir,
         get_app_manifest,
@@ -245,6 +248,7 @@ if TYPE_CHECKING:  # names it serves from outside the family, from their homes
     import ipaddress  # noqa: F401
     import json  # noqa: F401
     import logging  # noqa: F401
+    import math  # noqa: F401
     import os  # noqa: F401
     import re  # noqa: F401
     import shutil  # noqa: F401

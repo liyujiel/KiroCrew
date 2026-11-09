@@ -714,7 +714,27 @@ def validate_token_with_app(
     app_name = data.get("app", "")
     if use_session_exp and not app_name and data.get("kind") != "session":
         return False, "", LINK_NOT_A_SESSION, ""
+    if app_name and not _app_token_live(app_name, data.get("iat")):
+        # Refused exactly like a forged token: the caller learns nothing about
+        # the app's state, and its SDK re-exchanges the secret as it does today.
+        return False, "", "invalid signature", ""
     return valid, user_id, reason, app_name
+
+
+def _app_token_live(app_name: str, iat: object) -> bool:
+    """Whether *app_name* is installed and enabled, and the token postdates its cutoff.
+
+    The HMAC key is gateway-wide, so a signature alone outlives a disable or an
+    uninstall. Deferred import: ``apps`` imports the dashboard auth modules.
+    """
+    from kiro_crew.apps.manager import app_token_cutoff
+
+    cutoff = app_token_cutoff(str(app_name))
+    if cutoff is None:
+        return False
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)):
+        return cutoff <= 0
+    return iat >= cutoff
 
 
 def claims_an_app_unverified(token: str) -> bool:
