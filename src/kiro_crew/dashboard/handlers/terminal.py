@@ -55,6 +55,7 @@ from kiro_crew.dashboard.handlers.terminal_lifecycle import (
     _sess_pid,
     _take_shell_to_evict,
     apply_terminal_enabled,
+    end_shells_if_policy_refuses,
 )
 from kiro_crew.dashboard.handlers.terminal_placement import (
     _CHAT_NOT_LOADED,
@@ -74,6 +75,7 @@ from kiro_crew.dashboard.handlers.terminal_session import (
     _get_config,
     _get_registry,
     _is_enabled,
+    _policy_refuses_terminal,
     _sel,
     _terminal_enabled,
     _TerminalSession,
