@@ -447,6 +447,21 @@ async def _on_permission_prompt(
                 fut.set_result("rejected")
                 _host_deny_cause = DENY_CAUSE_APPROVAL_UNDELIVERABLE
                 _host_deny_reason = "the approval prompt could not be delivered to Slack"
+    if not fut.done():
+        # One plain call: the hand-off runs as its own task, never awaited here, so no
+        # await sits between registering the approval and the try that cleans it up.
+        from kiro_crew.notifications.bridge_approval_note import schedule_pending_approval
+
+        schedule_pending_approval(
+            state,
+            fut,
+            slot_key=slot.key,
+            session_key=session_key,
+            request_id=str(event.request_id),
+            tool_title=event.tool_name or "",
+            session_title=slot.display_title,
+            slack_card=_slack_approval_ts is not None,
+        )
     # Pre-seeded so the `finally` backstop below is total over EVERY
     # exit from the await — including CancelledError, which slot
     # deletion / cleanup endpoints raise by cancelling slot.task.
