@@ -219,6 +219,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _FLAT_SUBSTITUTION_RE,
         _FUNCTION_BIND_CAP,
         _FUNCTION_DEF_RE,
+        _GLOB_OPERAND_PROGRAMS,
         _HOSTNAME_SUBSTITUTION_HINTS,
         _HOSTNAME_VARIABLE_FORMS,
         _LINE_ASSIGNMENT_RE,

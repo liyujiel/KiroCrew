@@ -126,6 +126,16 @@ _SSH_FAMILY_VERBS: frozenset[str] = frozenset({"ssh", "scp", "sftp", "rsync"})
 _BINARY_COPY_VERBS: frozenset[str] = frozenset({"cp", "mv", "ln", "install"})
 
 
+# Programs whose operands are file names or list words, never a program they
+# launch, so a bare glob among them (``git add s* *.*``) expands to files the
+# program reads; read beside ``_DATA_CONSUMER_PROGRAMS``.  Both list what does
+# NOT launch: an unlisted program is read as one that could launch the glob.
+_GLOB_OPERAND_PROGRAMS: frozenset[str] = frozenset(
+    "tar tar.exe zip unzip gzip gunzip bzip2 xz zstd 7z git for select case wc"
+    " dir attrib get-childitem gci".split()
+)
+
+
 # A leading environment-assignment word (``FOO=bar cmd``) keeps the NEXT
 # token in program position.  The walk reads lowercased text.
 _ENV_ASSIGN_PREFIX_RE = re.compile(r"[a-z_][a-z0-9_]*=")
@@ -1081,19 +1091,26 @@ def _is_ssh_to_self(text_lower: str) -> bool:
         disqualified: "bool | None" = None
         for i, token in enumerate(tokens):
             verb = _ssh_family_verb(token)
-            # A verb read through a bare glob (``s?h``, a lone ``*``) expands only
-            # in the working directory, so it already spends the one filesystem
-            # expansion this floor models and a glob operand after it is not read
-            # as this host.  Two wildcard words in a row are every five-field cron
-            # schedule (``0 * * * *``), and a working directory that expands both
-            # into a self connection also makes a lone ``*`` that whole command
-            # line, which no static floor reads.  A verb glob with a directory part
-            # (``/usr/bin/s?h``) expands outside it, so its operands keep glob
-            # host matching.
+            # ``glob_verb`` turns glob host matching off after a glob verb that
+            # is only ``*`` (cron schedules such as ``0 * * * *``; a lone ``*``
+            # is a whole command line no static floor reads), or a bare glob
+            # operand of a ``_GLOB_OPERAND_PROGRAMS`` program (``git add s*
+            # *.*``).  Any other glob verb (``s?h local*``, ``env s?h local*``,
+            # ``/usr/bin/s?h``) keeps it: a caller can create the files.
             glob_verb = (
                 verb is not None
                 and _ssh_verb_basename(token) != verb
-                and not any(sep in token for sep in "/\\")
+                and (
+                    not token.strip("*")
+                    or (
+                        not cmd_start
+                        and (
+                            programs[i] in _GLOB_OPERAND_PROGRAMS
+                            or programs[i] in _shell_normalizer._DATA_CONSUMER_PROGRAMS
+                        )
+                        and not any(sep in token for sep in "/\\")
+                    )
+                )
             )
             if verb is None and bound_program_verbs:
                 stripped_prog = token.strip("\"'")

@@ -739,7 +739,10 @@ def _url_payload_command(n: int) -> str:
 #: ``max_address_space_mb``. Re-measured.
 #: Raised by 3, from 35,143, for the ``crew-oauth-bridge`` leaf on the read-gate floor
 #: in ``paths_lists`` (Connection bridge snapshots, fenced from file tools). Re-measured.
-_PACKAGE_LINE_BUDGET = 35_146
+#: Raised by 18, from 35,146, for the ssh floor's ``_GLOB_OPERAND_PROGRAMS`` and its
+#: facade row, so a glob verb in program position or after a launcher keeps reading
+#: its glob host as this host. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_164
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

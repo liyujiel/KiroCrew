@@ -736,10 +736,36 @@ class TestSandboxEscapeSshSelf:
             "0 9 * * 1-5",
             "*/15 * * * *",
             "it runs on the cron schedule 0 * * * * (top of every hour).",
-            # The residual this costs: a bare glob verb and its glob host both
-            # expand in a working directory the caller filled, which already
-            # makes a lone ``*`` the whole connection.
-            "s?h local*",
+            # The residual this costs: a verb word of only ``*`` and its glob
+            # host both expand in a working directory the caller filled, which
+            # already makes a lone ``*`` the whole connection.
+            "** *",
+            # A bare glob that is a file operand of a program that reads its
+            # operands as names expands to files, not an ssh program.
+            "tar -czf handoff.tgz s* *.*",
+            "zip -r handoff.zip s* *.*",
+            "git add s* *.*",
+            'for f in s* *.*; do wc -l "$f"; done',
+            "gzip -9 s* *.1",
+            "git status --short -- r* l*",
+            "git ls-files -- '*sh' '*.*'",
+            "tar -czf sources.tgz *c 1*",
+            "dir s* *.*",
+            "dir /b r* *.*",
+            "tar.exe -czf handoff.tgz s* *.*",
+            "get-childitem -path s* *.*",
+            "attrib -r s* *.*",
+            # git and tar read their operands as repo/file names, never a
+            # program they exec, so an ssh-verb glob among them with a glob
+            # host after it is two file names, not a connection.  (git's own
+            # scp-like remote and tar's host:file transport are a separate
+            # floor gap that predates this rule: the floor models only literal
+            # ssh/scp/sftp/rsync verbs, and these forms read the same on main.)
+            "git add s?h local*",
+            "git clone s?h local*:x",
+            "git ls-remote s* local*:x",
+            "tar -czf x.tgz s?h local*",
+            "tar -cf local*:out.tar s* l*",
         ],
     )
     def test_a_glob_host_after_a_glob_verb_is_not_this_host(self, text):
@@ -767,6 +793,32 @@ class TestSandboxEscapeSshSelf:
         ],
     )
     def test_one_glob_beside_a_literal_still_names_this_host(self, cmd):
+        assert _denied_by(cmd) == self._RULE, cmd
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # In a directory holding files named ``ssh`` and ``localhost`` (an
+            # agent can create both), the shell expands each of these into an
+            # ssh connection to this host.
+            "s?h -F /dev/null local* id",
+            "s?h local*",
+            "s?h local* id",
+            "s[s]h local* id",
+            "?sh local* id",
+            "ss* local* id",
+            "s?h -F /dev/null 127.* id",
+            "s[s]h 127.* id",
+            "?sh -F /dev/null localhos? id",
+            "s?h ::? id",
+            # A launcher runs the glob it is handed, so its glob host still counts.
+            "env s?h local* id",
+            "nohup s?h local* id",
+            "timeout 5 s?h -F /dev/null local* id",
+            "true; s?h local* id",
+        ],
+    )
+    def test_a_glob_host_after_a_bare_ssh_verb_glob_is_this_host(self, cmd):
         assert _denied_by(cmd) == self._RULE, cmd
 
     @pytest.mark.asyncio
