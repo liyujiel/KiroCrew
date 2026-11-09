@@ -90,7 +90,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Iterator, MutableSet
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +190,12 @@ class _Entry:
     runtime: OwnedRuntime
     key: Hashable
     leases: dict[str, str] = field(default_factory=dict)
+    # Closed to joins (:meth:`RuntimeOwnership.close_to_joins`): the process keeps
+    # its current holders and dies with the last of them, but no new lease lands.
+    closed: bool = False
 
     def has_room(self, cap: int) -> bool:
-        return len(self.leases) < cap
+        return not self.closed and len(self.leases) < cap
 
     def session_keys(self) -> list[str]:
         return sorted(set(self.leases.values()))
@@ -408,6 +411,25 @@ class RuntimeOwnership:
                 continue
             total += len(entry.leases)
         return total
+
+    def close_to_joins(self, pid: int) -> int:
+        """Stop new leases landing on the live runtime(s) on *pid*; how many closed.
+
+        For a shared process that must be reclaimed while co-tenants still hold
+        it: recycling one co-tenant releases one lease and frees nothing, and a
+        recycled or returning chat with the same key would join the same process.
+        Closed, every such start founds a new process, and this one drains and is
+        killed by the release of its last lease. Never reopened.
+        """
+        closed = 0
+        for entry in self._entries:
+            if entry.closed or _pid_of(entry.runtime) != pid or not self._alive(entry):
+                continue
+            entry.closed = True
+            closed += 1
+        if closed:
+            logger.info("runtime_ownership outcome=closed_to_joins pid=%s", pid)
+        return closed
 
     def lease_keys_on_pid(self, pid: int) -> frozenset[str]:
         """WHICH sessions hold a live lease on *pid*, for the auth boundary.
@@ -1217,6 +1239,84 @@ def _lease_holder(provider: object) -> object | None:
     return None
 
 
+def holds_runtime_lease(provider: object) -> bool:
+    """Whether *provider* currently holds an outstanding runtime lease.
+
+    True when the lease holder's slot carries a lease STRING. This is NOT a
+    sharing-eligibility test: a registered non-sharing chat also takes a lease at
+    registration (``acquire_session_lease``), so it answers True too. A provider
+    with no lease slot, or an empty one -- a provider before registration, a
+    non-ACP backend, a test double -- answers False. For the shared-vs-default
+    question use :func:`is_shared_chat_runtime`, which reads ``_shared_runtime``.
+    A failed-start cleanup uses THIS to tell a provider that has already taken a
+    lease (tear down through its own shutdown, which evicts its session and kills
+    only the last holder) from one that has not (keep the unconditional hard
+    kill): before registration no lease is held, so that cleanup is authorized.
+
+    Duck-typed via :func:`_lease_holder`, so a ``MagicMock`` provider (whose
+    ``_runtime_lease`` resolves to a mock, not ``None`` or a string) is NOT
+    recognised as a holder and answers False -- the non-sharing behaviour the
+    kill-path tests pin.
+    """
+    holder = _lease_holder(provider)
+    if holder is None:
+        return False
+    return isinstance(getattr(holder, "_runtime_lease", None), str)
+
+
+def is_shared_chat_runtime(provider: object) -> bool:
+    """Whether *provider* runs on a SHARED chat runtime (founder or joiner).
+
+    The discriminator for the ownerless control-frame gates in
+    ``chat_runner._run_chat``: only a chat-shared runtime fans a `/clear`,
+    agent-switch or compaction frame to a peer, so the gates that protect a
+    co-tenant must engage ONLY here. A non-sharing session -- the shipped
+    default (chat sharing off), a subagent, a cron/task session -- answers
+    False, so those branches run byte-identically to base for it.
+
+    Reads ``_shared_runtime`` (set from ``chat_share_key is not None`` when the
+    provider is built), which is the same flag ``AcpSessionProvider._chat_turn_gate``
+    uses to decide whether to serialize the turn. A runtime LEASE does NOT tell
+    the two apart: the unshared path also takes a lease at registration
+    (``acquire_session_lease``), so every registered chat holds a lease string
+    whether or not it shares -- ``holds_runtime_lease`` therefore cannot gate
+    these branches.
+
+    Duck-typed on both the provider and its ``_client`` wrapper (the inner
+    ``AcpSessionProvider`` carries the flag), and defaults to False for a shape
+    that has no such attribute -- a non-ACP provider or a test double -- so the
+    gate stays off unless a real shared-runtime provider says otherwise.
+    """
+    for candidate in (provider, getattr(provider, "_client", None)):
+        if candidate is None:
+            continue
+        if getattr(candidate, "_shared_runtime", False) is True:
+            return True
+    return False
+
+
+def chat_turn_gate_hold(provider: object) -> Any:
+    """An async context that holds *provider*'s shared chat turn gate, or a null one.
+
+    For the compaction paths, which run ``/compact`` and then may wait for the
+    deferred receipt: on a SHARED chat runtime the gate is held across both
+    (``AcpSessionProvider.hold_chat_turn_gate``). Every other provider -- the
+    preview off, a subagent, a non-ACP provider, a test double -- gets
+    ``contextlib.nullcontext()``, so those paths run exactly as before.
+    """
+    import contextlib
+
+    if not is_shared_chat_runtime(provider):
+        return contextlib.nullcontext()
+    hold = getattr(provider, "hold_chat_turn_gate", None)
+    if hold is None:
+        return contextlib.nullcontext()
+    held = hold()
+    if hasattr(held, "__aenter__") and hasattr(held, "__aexit__"):
+        return held
+    return contextlib.nullcontext()
+
+
 async def acquire_session_lease(provider: object) -> None:
     """Record a registered session's claim on its runtime. No-op for other shapes.
 
@@ -1264,6 +1364,9 @@ __all__ = [
     "authorize_runtime_kill",
     "claim_runtime_tenancy",
     "commit_runtime_teardown",
+    "holds_runtime_lease",
+    "chat_turn_gate_hold",
+    "is_shared_chat_runtime",
     "note_runtime_kill",
     "outstanding_leases",
     "release_runtime_teardown",
