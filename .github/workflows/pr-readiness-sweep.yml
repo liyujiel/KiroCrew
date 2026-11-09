@@ -196,6 +196,15 @@ jobs:
           # set in a single sweep, so a genuine backlog drains in one pass; it
           # exists only to bound a single sweep against a pathological run.
           MAX_DISPATCH: "200"
+          # Rate-limit reserve. The sweep's token shares the installation's
+          # hourly REST pool with every lane, and a full recompute costs about
+          # 24 calls (measured 2026-11-09, #34120). Before dispatching, the
+          # sweep reads `/rate_limit` (free) and dispatches only what fits
+          # above RATE_RESERVE at DISPATCH_COST each; the rest wait for the
+          # next tick, oldest first. Dispatching into a spent pool only makes
+          # recomputes that fail and leave the status stale again.
+          RATE_RESERVE: "3000"
+          DISPATCH_COST: "25"
         run: |
           set -euo pipefail
 
@@ -228,6 +237,22 @@ jobs:
           # exists for. test_pr_readiness_sweep.py pins the pairing.
           publish_lag_seconds=180
           pending_min_age_seconds="$publish_lag_seconds"
+
+          # Debounce for the "a check completed later" re-fires. A head's lanes
+          # finish one after another, and without this each completion earns
+          # its own full recompute (50 of 107 heads re-fired 2 to 4 times in
+          # one hour, measured in #34120). While another check-run on the head
+          # is still queued or in progress, the next completion re-opens the
+          # same condition, so
+          # the re-fire waits for it: the LAST completion still re-fires, which
+          # keeps the verdict correct on the final state. A check-run that
+          # stays running for STALE_MINUTES past the newest completion (a hung
+          # lane) no longer holds it. Not applied to the green arm: a stale
+          # green permits a merge, so that rescue stays immediate.
+          # lanes_still_running <newest completion epoch>
+          lanes_still_running() {
+            [ "$running" -gt 0 ] && [ "$1" -gt $(( now_epoch - stale_seconds )) ]
+          }
 
           # Newest disposition-record timestamp on a PR, as an epoch; 0 when
           # there is none or the read fails. Shared by BOTH staleness arms
@@ -408,6 +433,8 @@ jobs:
             # lists so they cannot drift.
             newest_check="$(jq -r '.newest_completed_check_at // empty' <<<"$row")"
             newest_fail="$(jq -r '.newest_failed_check_at // empty' <<<"$row")"
+            running="$(jq -r '.running_checks // 0' <<<"$row")"
+            case "$running" in '' | *[!0-9]*) running=0 ;; esac
 
             # Newest human review submission or dismissal on the pull request.
             # Readiness blocks on a changes-requested review of the head. A
@@ -612,6 +639,11 @@ jobs:
                   fi
                   reason="pending for ${age}s (> ${stale_seconds}s) after a read failure, which a recompute resolves"
                 else
+                  if lanes_still_running "$newest_epoch"; then
+                    echo "PR #$number: PR Readiness pending at $sha has later check evidence," \
+                      "but $running check(s) are still running; the last completion re-fires it."
+                    continue
+                  fi
                   reason="pending for ${age}s with a check completed later at $newest_check"
                 fi
                 ;;
@@ -653,6 +685,11 @@ jobs:
                 # Strictly newer, with a small margin so a check completing in
                 # the same second as the publish does not look like new evidence.
                 if [ "$newest_epoch" -gt $(( updated_epoch + 5 )) ]; then
+                  if lanes_still_running "$newest_epoch"; then
+                    echo "PR #$number: PR Readiness failure at $sha has later check evidence," \
+                      "but $running check(s) are still running; the last completion re-fires it."
+                    continue
+                  fi
                   reason="failure published at $updated_at but a check completed later at $newest_check"
                 elif [ "$age" -ge "$publish_lag_seconds" ] \
                   && [ "$review_epoch" -gt $(( updated_epoch - publish_lag_seconds )) ]; then
@@ -866,6 +903,17 @@ jobs:
 
           dispatched=0
           skipped_cap=0
+          skipped_reserve=0
+          # How many recomputes fit above the reserve. An unreadable or
+          # non-numeric answer keeps the MAX_DISPATCH cap alone, as before.
+          dispatch_budget="$MAX_DISPATCH"
+          remaining="$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || true)"
+          if [[ "$remaining" =~ ^[0-9]+$ ]]; then
+            fit=$(( (remaining - RATE_RESERVE) / DISPATCH_COST ))
+            [ "$fit" -ge 0 ] || fit=0
+            [ "$fit" -ge "$dispatch_budget" ] || dispatch_budget="$fit"
+            echo "REST pool: $remaining remaining; room for $dispatch_budget recompute(s) above the reserve of $RATE_RESERVE."
+          fi
           skipped_active=0
 
           # Second pass: dispatch OLDEST-stale-first (numeric sort ascending on
@@ -883,6 +931,10 @@ jobs:
               skipped_active=$(( skipped_active + 1 ))
               continue
             fi
+            if [ "$dispatched" -ge "$dispatch_budget" ]; then
+              skipped_reserve=$(( skipped_reserve + 1 ))
+              continue
+            fi
             echo "PR #$number: PR Readiness $reason at $sha -> re-firing recompute."
             if gh workflow run pr-readiness.yml --repo "$REPO" \
                 -f pr="$number" -f sha="$sha" >/dev/null 2>&1; then
@@ -894,4 +946,4 @@ jobs:
 
           rm -f "$stale_file" "$active_wd_pairs"
 
-          echo "Re-fired $dispatched recompute(s); $skipped_active stale PR(s) skipped (dispatch already active); $skipped_cap stale PR(s) deferred to next sweep by MAX_DISPATCH=$MAX_DISPATCH."
+          echo "Re-fired $dispatched recompute(s); $skipped_active stale PR(s) skipped (dispatch already active); $skipped_cap stale PR(s) deferred to next sweep by MAX_DISPATCH=$MAX_DISPATCH; $skipped_reserve deferred by the rate-limit reserve."
