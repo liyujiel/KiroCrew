@@ -3,8 +3,10 @@
  *  watchdog compose this from `useWebSocket`. */
 import { useMemo, useRef, type MutableRefObject } from 'react'
 import type { AppDispatch } from '../../store'
+import type { OfflineCause } from '../../store/dashboardSlice'
 import { markGatewayDisconnected } from './gatewayConnectivity'
 import { chunkScopeCapability } from '../../lib/chunkScopeCapability'
+import { QUIET_RECONNECT_GRACE_MS, classifyClose, isQuietClose, type SocketCloseKind } from './relayClose'
 
 /** The fold-watch capability this bundle declares on `/api/ws` (see
  *  `foldWatch.ts`). A wire token, not copy. */
@@ -17,6 +19,13 @@ export const foldApplyCapability = 'fold_delta.2'
 
 
 export type LogCallback = ((data: { level: string; msg: string }) => void) | null
+
+type QuietReconnect = { kind: SocketCloseKind; timer: ReturnType<typeof setTimeout> }
+
+function endQuiet(quietRef: MutableRefObject<QuietReconnect | null>): void {
+  if (quietRef.current) clearTimeout(quietRef.current.timer)
+  quietRef.current = null
+}
 
 /** First reconnect delay; each consecutive failure doubles it. */
 const RECONNECT_INITIAL_MS = 1000
@@ -41,8 +50,12 @@ export interface SocketConnection {
   resetBackoff(): void
   /** `onclose` for `ws`: a stale socket is ignored entirely; the live one is
    *  marked disconnected and, unless the hook is unmounting, releases its
-   *  voice stream and schedules `reconnect` after the current backoff. */
-  handleClose(ws: WebSocket, dispatch: AppDispatch, releaseVoice: () => void, reconnect: () => void): void
+   *  voice stream and schedules `reconnect` after the current backoff.
+   *  A relay token-expiry or drain close (`relayClose.ts`) of a socket that
+   *  had opened reconnects at once and stays connected for up to
+   *  `QUIET_RECONNECT_GRACE_MS`; only a reconnect that fails to open in that
+   *  time marks it disconnected, as `session_ended` after a token expiry. */
+  handleClose(ws: WebSocket, dispatch: AppDispatch, releaseVoice: () => void, reconnect: () => void, code?: number): void
   /** Replace the socket now, resetting the backoff. */
   forceReconnect(releaseVoice: () => void, reconnect: () => void): void
   /** Send `payload` on the live socket; dropped while it is not OPEN. */
@@ -64,6 +77,12 @@ export function useSocketConnection(): SocketConnection {
   const closingRef = useRef(false)  // true when cleanup intentionally closes WS
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>()  // pending reconnect timer
   const reconnectRef = useRef(RECONNECT_INITIAL_MS)
+  // The quiet reconnect in flight after a relay token-expiry or drain close,
+  // with its grace timer; null when none. Ended by the next open.
+  const quietRef = useRef<QuietReconnect | null>(null)
+  // The relay's reason for the outage, kept until a socket opens: the later
+  // sockets that fail to open carry no code of their own.
+  const causeRef = useRef<OfflineCause | undefined>(undefined)
   const wasConnectedRef = useRef(false)
   const reconnectingRef = useRef(false)  // suppress markSlotUnread during reconnect catch-up
   const logCbRef = useRef<LogCallback>(null)
@@ -101,13 +120,37 @@ export function useSocketConnection(): SocketConnection {
     },
     resetBackoff() {
       reconnectRef.current = RECONNECT_INITIAL_MS
+      endQuiet(quietRef)
+      causeRef.current = undefined
     },
-    handleClose(ws, dispatch, releaseVoice, reconnect) {
+    handleClose(ws, dispatch, releaseVoice, reconnect, code) {
       // Stale WS (e.g. from StrictMode cleanup) — ignore entirely.
       if (wsRef.current !== ws) return
-
-      markGatewayDisconnected(dispatch)
       wsRef.current = null
+
+      // A socket closed while a quiet reconnect was pending never opened.
+      const failedQuiet = quietRef.current
+      endQuiet(quietRef)
+      const kind = classifyClose(code)
+      if (!failedQuiet && !closingRef.current && isQuietClose(kind)) {
+        // shortcut: a relay that closed a fresh socket with 4401 again would
+        // reconnect quietly each time; a refused token is a plain 401 at the
+        // upgrade, so the next socket never opens and this ends below.
+        releaseVoice()
+        // The grace ran out with the reconnect still opening: say so. The entry
+        // stays, so that socket's own close still reads as a failed reconnect.
+        const timer = setTimeout(() => {
+          markGatewayDisconnected(dispatch, kind === 'token_renewal' ? 'session_ended' : undefined)
+        }, QUIET_RECONNECT_GRACE_MS)
+        quietRef.current = { kind, timer }
+        reconnectTimerRef.current = setTimeout(reconnect, 0)
+        return
+      }
+
+      causeRef.current = failedQuiet?.kind === 'token_renewal' ? 'session_ended'
+        : kind === 'refused' ? 'refused'
+          : causeRef.current
+      markGatewayDisconnected(dispatch, causeRef.current)
 
       if (closingRef.current) return
       releaseVoice()
@@ -128,6 +171,7 @@ export function useSocketConnection(): SocketConnection {
       if (closingRef.current) return
       clearTimeout(reconnectTimerRef.current)
       reconnectRef.current = RECONNECT_INITIAL_MS  // reset backoff window
+      endQuiet(quietRef)
       const ws = wsRef.current
       if (ws && ws.readyState !== WebSocket.CLOSED) {
         releaseVoice()
@@ -160,6 +204,7 @@ export function useSocketConnection(): SocketConnection {
     beginClosing() {
       closingRef.current = true
       clearTimeout(reconnectTimerRef.current)
+      endQuiet(quietRef)
     },
     closeForUnmount() {
       wsRef.current?.close()
