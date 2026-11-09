@@ -217,6 +217,35 @@ describe('WorkspaceModal — creation flow', () => {
     expect(screen.getByText('Create Workspace')).toBeInTheDocument()
   })
 
+  // A copy whose source folder is gone still creates the (empty) workspace, and the
+  // server says so in `warnings`. The dialog must show that line instead of closing
+  // as if the copy happened, and whichever way it is left, the new workspace is
+  // still the one the form picks up.
+  const exits: [string, (modal: HTMLElement) => void][] = [
+    ['Done', modal => fireEvent.click(within(modal).getByRole('button', { name: 'Done' }))],
+    ['the close button', modal => fireEvent.click(within(modal).getByRole('button', { name: 'Close' }))],
+    ['Escape', () => fireEvent.keyDown(document, { key: 'Escape' })],
+  ]
+  it.each(exits)('shows the copy warning, then %s picks the new workspace', async (_, leave) => {
+    const warning = "source workspace 'oncall' has no folder at 'workspace-oncall'; nothing was copied"
+    mockApi.createWorkspace.mockResolvedValue({ ok: true, name: 'copied', warnings: [warning] })
+    renderPage()
+    await screen.findByTestId('crew-card')
+    await openModalViaWorkspaceDropdown()
+
+    const modal = screen.getByRole('dialog', { name: 'Create Workspace' })
+    fireEvent.change(within(modal).getByPlaceholderText('e.g. oncall'), { target: { value: 'copied' } })
+    fireEvent.click(within(modal).getByRole('option', { name: 'oncall' }))
+    fireEvent.click(within(modal).getByRole('button', { name: 'Create' }))
+
+    expect(await within(modal).findByText(warning)).toBeInTheDocument()
+    expect(mockApi.createWorkspace).toHaveBeenCalledWith({ name: 'copied', dir: 'workspace-copied', copy_from: 'oncall' })
+    leave(modal)
+    await waitFor(() => expect(screen.queryByText('Create Workspace')).not.toBeInTheDocument())
+    const sheet = screen.getByRole('dialog', { name: 'New bot' })
+    await waitFor(() => expect(within(sheet).getByRole('combobox', { name: 'Workspace' })).toHaveTextContent('copied'))
+  })
+
   it('"Copy from" StyledSelect shows existing workspaces', async () => {
     renderPage()
     await screen.findByTestId('crew-card')
